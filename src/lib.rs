@@ -259,7 +259,7 @@ pub mod deserialize {
         }
         impl<'a> FileIterV1<'a> {
             /// Crates a new iterator that yields [`FileMeta`]s.
-            /// `bytes` should be after `path_length_bytes`.
+            /// `bytes` should be after `path_length_bytes`; the `files` segment
             #[must_use]
             pub fn new(
                 bytes: &'a [u8],
@@ -277,7 +277,8 @@ pub mod deserialize {
         impl<'a> Iterator for FileIterV1<'a> {
             type Item = Result<FileMeta, ParseFileErrorV1>;
             fn next(&mut self) -> Option<Self::Item> {
-                if self.current_position as u64 >= self.header_size {
+                // `header_size` includes 9 bytes we don't want.
+                if self.current_position as u64 >= (self.header_size - (8 + 1)) {
                     return None;
                 }
                 let file = match parse_file_meta_v1(
@@ -334,6 +335,8 @@ pub mod deserialize {
                 .ok()
                 .ok_or(Error::MetadataWrong)?;
 
+            println!("Pos: {:?}", reader.borrow_mut().seek(SeekFrom::Current(0)));
+
             let header = {
                 let mut header = Vec::with_capacity(header_size_usize);
                 // Is OK, since I read just enough data to fill it. We don't have any problems with dropping, since they are all integers
@@ -351,14 +354,13 @@ pub mod deserialize {
             let files = {
                 let mut vec = Vec::with_capacity(512);
                 // Not `&header[8+1..]` since `header_size` and `path_length_bytes` bytes aren't in it.
-                // Though, `header_size` does include those, so we have to subtract 9 from it to get it aligned to where the `header` bytes start.
                 'files: for file in
-                    metadata::FileIterV1::new(&header, path_length_bytes, header_size - (8 + 1))
+                    metadata::FileIterV1::new(&header, path_length_bytes, header_size)
                 {
                     let file = match file {
                         Ok(file_meta) => {
                             let path = {
-                                let vec = header[file_meta.path_length
+                                let vec = header[file_meta.path_start
                                     ..file_meta.path_start + file_meta.path_length]
                                     .to_vec();
                                 let string =
