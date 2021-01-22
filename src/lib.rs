@@ -108,7 +108,19 @@ pub mod deserialize {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             self.align()?;
 
-            match self.source.borrow_mut().read(buf) {
+            // To remove one syscall to fill empty slice.
+            if self.offset == self.size {
+                return Ok(0);
+            }
+
+            let slice = if self.size - self.offset < buf.len() as u64 {
+                // Will not panic; above guarantees `self.size - self.offset` is less than usize, else buf.len() could not return.
+                &mut buf[..(self.size - self.offset) as usize]
+            } else {
+                buf
+            };
+
+            match self.source.borrow_mut().read(slice) {
                 Err(err) => Err(err),
                 Ok(read) => {
                     self.offset += read as u64;
