@@ -1,5 +1,5 @@
 #![warn(missing_debug_implementations, missing_docs)]
-#![allow(unused_labels)]
+#![allow(unused_labels, clippy::wildcard_imports)]
 #![warn(clippy::pedantic, clippy::cargo)]
 
 //! This is a lib and binary crate to bundle files to a single one, like zipping it without compression.
@@ -53,7 +53,8 @@ pub(crate) fn read_saturate<R: std::io::Read>(
     Ok(read)
 }
 
-pub(crate) const DEFAULT_BUF_SIZE: usize = 1024 * 64; // 2^16 bytes; 1024 * 64; 64KB
+/// Default buffer size for this crate.
+pub(crate) const DEFAULT_BUFFER_SIZE: usize = 1024 * 64; // 2^16 bytes; 1024 * 64; 64KB
 
 /// Parsing module, including all versions and supporting structs and enums.
 pub mod deserialize {
@@ -463,7 +464,190 @@ pub mod deserialize {
     }
 }
 
-pub mod package {
+pub mod serialize {
+    use super::*;
+    use std::{
+        fs,
+        fs::Metadata,
+        io,
+        io::prelude::*,
+        path::{Path, PathBuf},
+    };
+
+    #[derive(Debug)]
+    pub enum Error {
+        InvalidUTF8,
+        Reader(io::Error),
+        Writer(io::Error),
+        Open(String),
+    }
+
+    /// Will crudely walk a dir at `path`.
+    ///
+    /// This does not extract the metadata; it's only cheap on Windows platforms.
+    /// I do not plan to change that, as this function works well with the rest of this crate.
+    ///
+    /// # Errors
+    /// Will return any errors from [`io`] functions.
+    /// This function tries to read metadata from files and view content in directories.
+    pub fn walk_dir<P: AsRef<Path>, F: Fn(&Path) -> bool>(
+        path: P,
+        filter: &F,
+    ) -> io::Result<Vec<PathBuf>> {
+        fn walk<F: Fn(&Path) -> bool>(
+            path: &Path,
+            filter: &F,
+            vec: &mut Vec<PathBuf>,
+        ) -> io::Result<()> {
+            let dir = path.read_dir()?;
+
+            for file in dir {
+                let file = file?;
+                let file_type = file.file_type()?;
+                let path = file.path();
+
+                if file_type.is_file() {
+                    if filter(&path) {
+                        vec.push(path);
+                    }
+                } else if file_type.is_dir() {
+                    walk(path.as_path(), filter, vec)?;
+                }
+            }
+            Ok(())
+        }
+        let mut files = Vec::new();
+
+        walk(path.as_ref(), filter, &mut files)?;
+
+        Ok(files)
+    }
+
+    pub fn latest<W: Write + Seek, R: Read, F: Fn(&Path) -> Result<R, Error>, P: AsRef<Path>>(
+        paths: Vec<P>,
+        mut dest: W,
+        open: F,
+    ) -> Result<(), Error> {
+        versions::write_v1(paths, dest, open)
+    }
+
+    pub mod versions {
+        use super::*;
+
+        /// Will serialize a set of paths.
+        /// `dest` should not be buffered, since only large chunks are written.
+        pub fn write_v1<
+            W: Write + Seek,
+            R: Read,
+            F: Fn(&Path) -> Result<R, Error>,
+            P: AsRef<Path>,
+        >(
+            paths: Vec<P>,
+            mut dest: W,
+            open: F,
+        ) -> Result<(), Error> {
+            let mut metadata = Vec::with_capacity(DEFAULT_BUFFER_SIZE);
+
+            metadata.extend_from_slice(MAGIC_NUMBER);
+            const VERSION: u32 = 1;
+            metadata.extend_from_slice(&VERSION.to_be_bytes());
+
+            let path_length_bytes = {
+                let mut longest: deserialize::UintParseType = 0;
+                for path in paths.iter() {
+                    let length = path.as_ref().to_str().ok_or(Error::InvalidUTF8)?.len() as u64;
+                    if length > longest {
+                        longest = length;
+                    }
+                }
+
+                let mut shift = longest >> 8;
+                let mut bytes: u8 = 1;
+                loop {
+                    if shift > 255 {
+                        shift = shift >> 8;
+                        bytes += 1;
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+                bytes
+            };
+            // From now, all paths are guaranteed to be valid UTF8.
+
+            println!("Header: {:?}", metadata);
+
+            let zero_u64 = &[0; 8];
+
+            // Header size
+            metadata.extend_from_slice(zero_u64);
+
+            // How many bytes to represent path.
+            metadata.extend_from_slice(&[path_length_bytes]);
+
+            // From start of file.
+            let mut file_size_positions = Vec::with_capacity(paths.len());
+            // Not UB since we're dealing with integers.
+            unsafe { file_size_positions.set_len(file_size_positions.capacity()) };
+
+            for (file, size_pos) in paths.iter().zip(file_size_positions.iter_mut()) {
+                let path = file.as_ref();
+                let s = path.to_str().unwrap();
+
+                *size_pos = metadata.len();
+                metadata.extend_from_slice(zero_u64);
+
+                let path_length = (s.len() as u64).to_be_bytes();
+                let path_length_bytes = &path_length[8 - path_length_bytes as usize..];
+
+                metadata.extend_from_slice(path_length_bytes);
+                metadata.extend_from_slice(s.as_bytes());
+            }
+
+            let header_offset = MAGIC_NUMBER.len() + 4;
+            let header_size = (metadata.len() - header_offset) as u64;
+            metadata[header_offset..header_offset + 8].copy_from_slice(&header_size.to_be_bytes());
+
+            println!("Header: {:?}", metadata);
+
+            dest.write_all(&metadata).map_err(Error::Writer)?;
+
+            let mut buffer = Vec::with_capacity(DEFAULT_BUFFER_SIZE);
+            // Not UB since we're dealing with integers.
+            unsafe { buffer.set_len(buffer.capacity()) };
+
+            for (file, size_pos) in paths.iter().zip(file_size_positions.iter()) {
+                let path = file.as_ref();
+                let mut reader = open(path)?;
+
+                let mut size = 0;
+
+                loop {
+                    let read = match reader.read(&mut buffer) {
+                        Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(err) => return Err(Error::Reader(err)),
+                        Ok(0) => break,
+                        Ok(read) => read,
+                    };
+
+                    size += read as u64;
+
+                    dest.write_all(&buffer[..read]).map_err(Error::Writer)?;
+                }
+
+                metadata[*size_pos..size_pos + 8].copy_from_slice(&size.to_be_bytes());
+            }
+
+            dest.seek(io::SeekFrom::Start(0)).map_err(Error::Writer)?;
+            dest.write_all(&metadata).map_err(Error::Writer)?;
+
+            Ok(())
+        }
+    }
+}
+
+/* pub mod package {
     use super::*;
     use std::{
         fs,
@@ -624,4 +808,4 @@ pub mod package {
 
         Ok(())
     }
-}
+} */
