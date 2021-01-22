@@ -13,7 +13,7 @@
 //! - Size of path length `path_length_bytes` (u8): byte to indicate length of length of paths (a big endian value of 1 indicates a path's length will take 1 byte)
 //! - List of file meta entries `files` (no defined length, that is what the header size is for)
 //!     - File size, `file_size` (u64): the file size. Used to calculate where the files are located in the file. (weak point for corruption, so maybe add a `file_position` too?)
-//!     - Path length, `path_length` (u(`path_length_bytes * 8`); [`UintParseType`]): how many bytes after of this will provide the path.
+//!     - Path length, `path_length` (u(`path_length_bytes * 8`); [`deserialize::UintParseType`]): how many bytes after of this will provide the path.
 //!     - Path data, `path` ([u8; `path_length`]): the path for this file, used in extraction. I have plans to cluster these when files start with the same bytes to avoid repetition (have a group for a folder with many files, so the individual files don't need the whole path.)
 
 /// The magic number associated with bundles. Used to offset all reading and when writing.
@@ -52,6 +52,8 @@ pub(crate) fn read_saturate<R: std::io::Read>(
     }
     Ok(read)
 }
+
+pub(crate) const DEFAULT_BUF_SIZE: usize = 1024 * 64; // 2^16 bytes; 1024 * 64; 64KB
 
 /// Parsing module, including all versions and supporting structs and enums.
 pub mod deserialize {
@@ -120,15 +122,12 @@ pub mod deserialize {
         files: Vec<File<'a, R>>,
     }
     impl<'a, R: Read + Seek> Files<'a, R> {
-        pub fn all(&self) -> &[File<'a, R>] {
-            self.files.as_slice()
-        }
-        pub fn mut_all(&mut self) -> &mut [File<'a, R>] {
+        pub fn all(&mut self) -> &mut [File<'a, R>] {
             self.files.as_mut_slice()
         }
 
-        pub fn filter<F: FnMut(&Path) -> bool>(&self, mut filter: F) -> Vec<&File<'a, R>> {
-            self.files.iter().filter(|f| filter(f.path())).collect()
+        pub fn filter<F: FnMut(&Path) -> bool>(&mut self, mut filter: F) -> Vec<&mut File<'a, R>> {
+            self.files.iter_mut().filter(|f| filter(f.path())).collect()
         }
     }
 
@@ -170,8 +169,8 @@ pub mod deserialize {
     /// General parse function. Will recognise version and call the appropriate function.
     ///
     /// # Errors
-    /// If a version is not supported, it will return a [`ParseError::VersionNotSupported`].
-    /// All other errors are inherited from the related [`versions`] functions. Check [`ParseError`] for possible values.
+    /// If a version is not supported, it will return a [`Error::VersionNotSupported`].
+    /// All other errors are inherited from the related [`versions`] functions. Check [`Error`] for possible values.
     pub fn parse<'a, R: Read + Seek>(
         reader: &'a RefCell<&'a mut R>,
     ) -> Result<Files<'a, R>, Error> {
@@ -334,8 +333,6 @@ pub mod deserialize {
             let path_length_bytes = UintBytesLength::new(path_length_bytes)
                 .ok()
                 .ok_or(Error::MetadataWrong)?;
-
-            println!("Pos: {:?}", reader.borrow_mut().seek(SeekFrom::Current(0)));
 
             let header = {
                 let mut header = Vec::with_capacity(header_size_usize);
@@ -790,7 +787,7 @@ pub mod package {
 
         // Now writing all files.
 
-        let mut buffer = Vec::with_capacity(4 * 8 * 1024 * 1024); // 4 bytes * 1024 (4kb) * 1024 (4mb)
+        let mut buffer = Vec::with_capacity(DEFAULT_BUF_SIZE);
 
         // Will not read bytes not overriden
         unsafe { buffer.set_len(buffer.capacity()) };
@@ -800,10 +797,10 @@ pub mod package {
                 Err(_) => return Err(Error::FileDisappeared),
                 Ok(file) => file,
             };
-            println!("Opened {:?}", path);
+            println!("Opened {:?} with buffer size {}", path, buffer.len());
 
             'copy: loop {
-                let read = read_saturate(&mut buffer, &mut file)?;
+                let read = file.read(&mut buffer)?;
                 destination.write_all(&buffer[..read])?;
                 println!("Wrote {} bytes to {:?}", read, path);
                 if read != buffer.len() {

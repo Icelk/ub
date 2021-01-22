@@ -36,7 +36,7 @@ fn extract_all<P1: AsRef<Path>, P2: AsRef<Path>>(
 
     let ref_cell = RefCell::new(&mut file);
 
-    for file in deserialize::parse(&ref_cell)?.mut_all() {
+    for file in deserialize::parse(&ref_cell)?.all() {
         let path = match dest.as_ref() {
             Some(dest) => Cow::Owned(dest.as_ref().join(file.path())),
             None => Cow::Borrowed(file.path()),
