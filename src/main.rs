@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    env, fs,
+    env, fs, io,
     path::{Path, PathBuf},
 };
 
@@ -32,7 +32,7 @@ fn extract_all<P1: AsRef<Path>, P2: AsRef<Path>>(
     path: P1,
     dest: Option<P2>,
 ) -> Result<(), deserialize::Error> {
-    let mut file = fs::File::open(path).map_err(deserialize::Error::Reader)?;
+    let mut file = io::BufReader::new(fs::File::open(path).map_err(deserialize::Error::Reader)?);
 
     let ref_cell = RefCell::new(&mut file);
 
@@ -47,11 +47,12 @@ fn extract_all<P1: AsRef<Path>, P2: AsRef<Path>>(
         dir.create(&path.with_file_name(""))
             .map_err(deserialize::Error::Reader)?;
 
-        let mut dest = fs::File::create(&path).map_err(deserialize::Error::Reader)?;
+        let mut dest =
+            io::BufWriter::new(fs::File::create(&path).map_err(deserialize::Error::Reader)?);
 
         println!("Created file! {:?}", &path);
 
-        std::io::copy(file, &mut dest).map_err(deserialize::Error::Reader)?;
+        io::copy(file, &mut dest).map_err(deserialize::Error::Reader)?;
     }
 
     Ok(())
