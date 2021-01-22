@@ -29,23 +29,11 @@ fn extract_all<P1: AsRef<Path>, P2: AsRef<Path>>(
     path: P1,
     dest: Option<P2>,
 ) -> Result<(), deserialize::Error> {
-    let mut file = io::BufReader::new(fs::File::open(path).map_err(deserialize::Error::Reader)?);
+    let mut file = fs::File::open(path).map_err(deserialize::Error::Reader)?;
 
     let ref_cell = RefCell::new(&mut file);
 
-    for file in deserialize::parse(&ref_cell)?.all() {
-        // use std::io::prelude::*;
-        // let mut v = Vec::new();
-        // file.read_to_end(&mut v).unwrap();
-        // println!("data: {:?}", std::str::from_utf8(&v));
-
-        // println!();
-        // println!();
-        // println!();
-        // println!();
-        // println!();
-        // file.align_to_start().unwrap();
-
+    for file in parse(&ref_cell)?.all() {
         let path = match dest.as_ref() {
             Some(dest) => Cow::Owned(dest.as_ref().join(file.path())),
             None => Cow::Borrowed(file.path()),
@@ -56,8 +44,7 @@ fn extract_all<P1: AsRef<Path>, P2: AsRef<Path>>(
         dir.create(&path.with_file_name(""))
             .map_err(deserialize::Error::Reader)?;
 
-        let mut dest =
-            io::BufWriter::new(fs::File::create(&path).map_err(deserialize::Error::Reader)?);
+        let mut dest = fs::File::create(&path).map_err(deserialize::Error::Reader)?;
 
         io::copy(file, &mut dest).map_err(deserialize::Error::Reader)?;
     }
@@ -69,7 +56,7 @@ fn package_all<P1: AsRef<Path>, P2: AsRef<Path>>(
     dir: P1,
     dest: Option<P2>,
 ) -> Result<(), serialize::Error> {
-    let paths = serialize::walk_dir(&dir, &|_| true).map_err(serialize::Error::Reader)?;
+    let paths = walk_dir(&dir, &|_| true).map_err(serialize::Error::Reader)?;
 
     let dest_path = match dest.as_ref() {
         Some(dest) => Cow::Borrowed(dest.as_ref()),
@@ -77,7 +64,7 @@ fn package_all<P1: AsRef<Path>, P2: AsRef<Path>>(
     };
     let dest = fs::File::create(&dest_path).map_err(serialize::Error::Writer)?;
 
-    serialize::latest(paths, dest, |path| {
+    write(&paths, dest, |path| {
         fs::File::open(path).map_err(serialize::Error::Reader)
     })
 }

@@ -1,6 +1,6 @@
 #![warn(missing_debug_implementations, missing_docs)]
-#![allow(unused_labels, clippy::wildcard_imports)]
 #![warn(clippy::pedantic, clippy::cargo)]
+#![allow(clippy::wildcard_imports, dead_code)]
 
 //! This is a lib and binary crate to bundle files to a single one, like zipping it without compression.
 //! Can bundle folders, and open bundles.
@@ -15,6 +15,9 @@
 //!     - File size, `file_size` (u64): the file size. Used to calculate where the files are located in the file. (weak point for corruption, so maybe add a `file_position` too?)
 //!     - Path length, `path_length` (u(`path_length_bytes * 8`); [`deserialize::UintParseType`]): how many bytes after of this will provide the path.
 //!     - Path data, `path` ([u8; `path_length`]): the path for this file, used in extraction. I have plans to cluster these when files start with the same bytes to avoid repetition (have a group for a folder with many files, so the individual files don't need the whole path.)
+
+pub use deserialize::{parse, File, Files};
+pub use serialize::{walk_dir, write};
 
 /// The magic number associated with bundles. Used to offset all reading and when writing.
 pub const MAGIC_NUMBER: &[u8] = b"";
@@ -67,6 +70,8 @@ pub mod deserialize {
         path::{Path, PathBuf},
     };
 
+    /// A parsed file. Contains a reference where in the reader the file is located, implements [`Read`], and contains a [`PathBuf`]
+    #[derive(Debug)]
     pub struct File<'a, R: Read + Seek> {
         source: &'a RefCell<&'a mut R>,
         size: u64,
@@ -76,14 +81,32 @@ pub mod deserialize {
         offset: u64,
     }
     impl<'a, R: Read + Seek> File<'a, R> {
+        /// Get a reference of the path this file is pointing at.
+        #[must_use]
+        #[inline]
         pub fn path(&self) -> &Path {
             self.path.as_path()
         }
+        /// Discards all information and return path. I dunno if this is useful...
+        #[must_use]
+        #[inline]
+        pub fn into_path(self) -> PathBuf {
+            self.path
+        }
 
+        /// Gets the size of this file.
+        #[must_use]
+        #[inline]
         pub fn size(&self) -> u64 {
             self.size
         }
 
+        /// Aligns the underlying reader to the position we last read at.
+        /// Can be used to continue reading a file.
+        ///
+        /// # Errors
+        /// Same as [`fs::File::seek()`]
+        #[inline]
         pub fn align(&mut self) -> io::Result<()> {
             match self
                 .source
@@ -94,6 +117,11 @@ pub mod deserialize {
                 Ok(_) => Ok(()),
             }
         }
+        /// Aligns the underlying reader to the start of this file, to start over and read it from the start.
+        ///
+        /// # Errors
+        /// Same as [`fs::File::seek()`]
+        #[inline]
         pub fn align_to_start(&mut self) -> io::Result<()> {
             match self
                 .source
@@ -116,6 +144,7 @@ pub mod deserialize {
 
             let slice = if self.size - self.offset < buf.len() as u64 {
                 // Will not panic; above guarantees `self.size - self.offset` is less than usize, else buf.len() could not return.
+                #[allow(clippy::cast_possible_truncation)]
                 &mut buf[..(self.size - self.offset) as usize]
             } else {
                 buf
@@ -132,9 +161,10 @@ pub mod deserialize {
     }
     impl<'a, R: Read + Seek> Seek for File<'a, R> {
         fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            #[allow(clippy::cast_sign_loss)]
             match pos {
                 io::SeekFrom::Current(offset) => {
-                    if -offset > self.offset as i64 {
+                    if offset.is_negative() && (-offset) as u64 > self.offset {
                         Err(io::ErrorKind::InvalidInput.into())
                     } else {
                         if offset < 0 {
@@ -154,10 +184,14 @@ pub mod deserialize {
                     }
                 }
                 io::SeekFrom::End(end) => {
-                    if (end + self.size() as i64) < 0 {
+                    if end.is_negative() && (-end) as u64 > self.size() {
                         Err(io::ErrorKind::InvalidInput.into())
                     } else {
-                        self.offset = (self.size() as i64 + end) as u64;
+                        self.offset = if end.is_negative() {
+                            self.size() - ((-end) as u64)
+                        } else {
+                            self.size() + (end as u64)
+                        };
                         Ok(self.offset)
                     }
                 }
@@ -165,14 +199,18 @@ pub mod deserialize {
         }
     }
 
+    /// A collection of files [`deserialize`]d by [`parse`].
+    #[derive(Debug)]
     pub struct Files<'a, R: Read + Seek> {
         files: Vec<File<'a, R>>,
     }
     impl<'a, R: Read + Seek> Files<'a, R> {
+        /// Get all the files.
         pub fn all(&mut self) -> &mut [File<'a, R>] {
             self.files.as_mut_slice()
         }
 
+        /// Filter through all files by path with `filter`.
         pub fn filter<F: FnMut(&Path) -> bool>(&mut self, mut filter: F) -> Vec<&mut File<'a, R>> {
             self.files.iter_mut().filter(|f| filter(f.path())).collect()
         }
@@ -214,6 +252,7 @@ pub mod deserialize {
     }
 
     /// General parse function. Will recognise version and call the appropriate function.
+    /// `reader` should not be buffered.
     ///
     /// # Errors
     /// If a version is not supported, it will return a [`Error::VersionNotSupported`].
@@ -227,13 +266,13 @@ pub mod deserialize {
             .read(&mut buffer)
             .map_err(Error::Reader)?;
         // Version type is constant; you can't change versioning formatting. I think 2^32 versions will be plenty.
-        let version = if read != buffer.len() {
-            return Err(Error::MetadataIncomplete);
-        } else {
+        let version = if read == buffer.len() {
             let value = buffer[MAGIC_NUMBER.len()..MAGIC_NUMBER.len() + 4]
                 .try_into()
                 .unwrap();
             u32::from_be_bytes(value)
+        } else {
+            return Err(Error::MetadataIncomplete);
         };
         match version {
             1 => versions::parse_v1(reader),
@@ -285,9 +324,6 @@ pub mod deserialize {
                 .ok_or(ParseFileErrorV1::PathLengthTooLong)?;
             start += path_length_bytes.get();
             let absolute_path_start = file_meta_start + start;
-            start = start
-                .checked_add(path_length)
-                .ok_or(ParseFileErrorV1::PathLengthTooLong)?;
             Ok(FileMeta {
                 path_start: absolute_path_start,
                 path_length,
@@ -357,10 +393,10 @@ pub mod deserialize {
         /// # Errors
         /// Will spew out most errors defined in [`Error`] enum.
         pub fn parse_v1<'a, R: Read + Seek>(
-            reader: &'a RefCell<&'a mut R>,
+            read_cell: &'a RefCell<&'a mut R>,
         ) -> Result<Files<'a, R>, Error> {
             let mut buffer = [0; 9];
-            let read = reader
+            let read = read_cell
                 .borrow_mut()
                 .read(&mut buffer)
                 .map_err(Error::Reader)?;
@@ -370,8 +406,7 @@ pub mod deserialize {
 
             // Header size is a u64 to support file headers above 4GBs.
             // Size not including version and magic number, but including itself.
-            let header_size = buffer[0..8].try_into().unwrap();
-            let header_size = u64::from_be_bytes(header_size);
+            let header_size = u64::from_be_bytes(buffer[0..8].try_into().unwrap());
             let header_size_usize = usize::try_from(header_size)
                 .ok()
                 .ok_or(Error::HeaderTooLarge)?;
@@ -385,7 +420,7 @@ pub mod deserialize {
                 let mut header = Vec::with_capacity(header_size_usize);
                 // Is OK, since I read just enough data to fill it. We don't have any problems with dropping, since they are all integers
                 unsafe { header.set_len(header.capacity()) };
-                if read_saturate(&mut header[..], &mut *reader.borrow_mut())
+                if read_saturate(&mut header[..], &mut *read_cell.borrow_mut())
                     .map_err(Error::Reader)?
                     != header.len()
                 {
@@ -398,9 +433,7 @@ pub mod deserialize {
             let files = {
                 let mut vec = Vec::with_capacity(512);
                 // Not `&header[8+1..]` since `header_size` and `path_length_bytes` bytes aren't in it.
-                'files: for file in
-                    metadata::FileIterV1::new(&header, path_length_bytes, header_size)
-                {
+                for file in metadata::FileIterV1::new(&header, path_length_bytes, header_size) {
                     let file = match file {
                         Ok(file_meta) => {
                             let path = {
@@ -412,7 +445,7 @@ pub mod deserialize {
                                 PathBuf::from(string)
                             };
                             let file = File {
-                                source: &reader,
+                                source: &read_cell,
                                 size: file_meta.file_size,
                                 position: position_in_file,
                                 path,
@@ -444,6 +477,7 @@ pub mod deserialize {
         /// The length is greater than the bytes supplied.
         BytesMissing,
     }
+    /// Representing `path_length_bytes`; the amount of bytes a path length is made of.
     #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
     pub struct UintBytesLength(u8);
     impl UintBytesLength {
@@ -498,21 +532,27 @@ pub mod deserialize {
     }
 }
 
+/// Serializes multiple objects to a single bundle.
 pub mod serialize {
     use super::*;
     use std::{
-        fs,
-        fs::Metadata,
         io,
         io::prelude::*,
         path::{Path, PathBuf},
     };
 
+    /// A general error for dealing with serializing
     #[derive(Debug)]
     pub enum Error {
+        /// Supplied path contains invalid UTF-8.
+        /// I plan to remove this limitation in the future.
+        /// See [`deserialize::Error::InvalidUTF8`]
         InvalidUTF8,
+        /// An error occurred in reading data.
         Reader(io::Error),
+        /// Error while writing data to the output writer.
         Writer(io::Error),
+        /// Error when opening data to include in bundle.
         Open(String),
     }
 
@@ -557,38 +597,49 @@ pub mod serialize {
         Ok(files)
     }
 
-    pub fn latest<W: Write + Seek, R: Read, F: Fn(&Path) -> Result<R, Error>, P: AsRef<Path>>(
-        paths: Vec<P>,
-        mut dest: W,
+    /// Bundle data from `paths` opened using the `open` function, and used to **write** to `dest`.
+    /// `open` can be used to preprocess files without using files to store temporary data; everything can be in memory.
+    /// `paths` order will be the same as in the resulting bundle.
+    /// `dest` should not be buffered; only large chunks are written.
+    ///
+    /// # Errors
+    /// This function will try to read from the supplied [`Read`] from `open` function.
+    /// Then it will write to `dest` and [`Write::flush()`] it.
+    pub fn write<W: Write + Seek, R: Read, F: Fn(&Path) -> Result<R, Error>, P: AsRef<Path>>(
+        paths: &[P],
+        dest: W,
         open: F,
     ) -> Result<(), Error> {
         versions::write_v1(paths, dest, open)
     }
 
+    /// The versions of the [`serialize`]r. Here for legacy and support over an applications lifespan.
     pub mod versions {
         use super::*;
 
-        /// Will serialize a set of paths.
-        /// `dest` should not be buffered, since only large chunks are written.
+        /// See [`write()`].
+        ///
+        /// # Errors
+        /// See [`write()`].
         pub fn write_v1<
             W: Write + Seek,
             R: Read,
             F: Fn(&Path) -> Result<R, Error>,
             P: AsRef<Path>,
         >(
-            paths: Vec<P>,
+            paths: &[P],
             mut dest: W,
             open: F,
         ) -> Result<(), Error> {
             let mut metadata = Vec::with_capacity(DEFAULT_BUFFER_SIZE);
 
             metadata.extend_from_slice(MAGIC_NUMBER);
-            const VERSION: u32 = 1;
-            metadata.extend_from_slice(&VERSION.to_be_bytes());
+            let version: u32 = 1;
+            metadata.extend_from_slice(&version.to_be_bytes());
 
             let path_length_bytes = {
                 let mut longest: deserialize::UintParseType = 0;
-                for path in paths.iter() {
+                for path in paths {
                     let length = path.as_ref().to_str().ok_or(Error::InvalidUTF8)?.len() as u64;
                     if length > longest {
                         longest = length;
@@ -599,7 +650,7 @@ pub mod serialize {
                 let mut bytes: u8 = 1;
                 loop {
                     if shift > 255 {
-                        shift = shift >> 8;
+                        shift >>= 8;
                         bytes += 1;
                         continue;
                     } else {
@@ -609,8 +660,6 @@ pub mod serialize {
                 bytes
             };
             // From now, all paths are guaranteed to be valid UTF8.
-
-            println!("Header: {:?}", metadata);
 
             let zero_u64 = &[0; 8];
 
@@ -643,8 +692,6 @@ pub mod serialize {
             let header_size = (metadata.len() - header_offset) as u64;
             metadata[header_offset..header_offset + 8].copy_from_slice(&header_size.to_be_bytes());
 
-            println!("Header: {:?}", metadata);
-
             dest.write_all(&metadata).map_err(Error::Writer)?;
 
             let mut buffer = Vec::with_capacity(DEFAULT_BUFFER_SIZE);
@@ -675,6 +722,8 @@ pub mod serialize {
 
             dest.seek(io::SeekFrom::Start(0)).map_err(Error::Writer)?;
             dest.write_all(&metadata).map_err(Error::Writer)?;
+
+            dest.flush().map_err(Error::Writer)?;
 
             Ok(())
         }

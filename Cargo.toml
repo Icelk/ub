@@ -1,5 +1,6 @@
 [package]
 name = "bundler"
+description = "Can bundle multiple sources to a single one and extract back."
 version = "0.1.0"
 authors = ["Icelk <main@icelk.dev>"]
 edition = "2018"
@@ -7,6 +8,10 @@ license = "MIT"
 repository = "https://github.com/Iselk/bundler"
 readme = "README.md"
 homepage = "https://icelk.dev/bundler/"
+documentation = "https://docs.rs/___/"
+
+categories = ["data-structures", "encoding", "command-line-utilities", "algorithms"]
+keywords = ["bundle", "package", "file-format"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
