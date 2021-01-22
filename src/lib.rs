@@ -130,6 +130,40 @@ pub mod deserialize {
             }
         }
     }
+    impl<'a, R: Read + Seek> Seek for File<'a, R> {
+        fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+            match pos {
+                io::SeekFrom::Current(offset) => {
+                    if -offset > self.offset as i64 {
+                        Err(io::ErrorKind::InvalidInput.into())
+                    } else {
+                        if offset < 0 {
+                            self.offset -= (-offset) as u64;
+                        } else {
+                            self.offset += offset as u64;
+                        }
+                        Ok(self.offset)
+                    }
+                }
+                io::SeekFrom::Start(start) => {
+                    if start < self.size() {
+                        self.offset = start;
+                        Ok(self.offset)
+                    } else {
+                        Err(io::ErrorKind::InvalidInput.into())
+                    }
+                }
+                io::SeekFrom::End(end) => {
+                    if (end + self.size() as i64) < 0 {
+                        Err(io::ErrorKind::InvalidInput.into())
+                    } else {
+                        self.offset = (self.size() as i64 + end) as u64;
+                        Ok(self.offset)
+                    }
+                }
+            }
+        }
+    }
 
     pub struct Files<'a, R: Read + Seek> {
         files: Vec<File<'a, R>>,
