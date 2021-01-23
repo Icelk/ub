@@ -1,14 +1,14 @@
 [package]
-name = "bundler"
+name = "ub"
 description = "Can bundle multiple sources to a single one and extract back."
 version = "0.1.0"
 authors = ["Icelk <main@icelk.dev>"]
 edition = "2018"
 license = "MIT"
-repository = "https://github.com/Iselk/bundler"
+repository = "https://github.com/Iselk/ub"
 readme = "README.md"
-homepage = "https://icelk.dev/bundler/"
-documentation = "https://docs.rs/___/"
+homepage = "https://icelk.dev/unified-bundler/"
+documentation = "https://docs.rs/ub/"
 
 categories = ["data-structures", "encoding", "command-line-utilities", "algorithms"]
 keywords = ["bundle", "package", "file-format"]
@@ -16,3 +16,7 @@ keywords = ["bundle", "package", "file-format"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+
+[[example]]
+name = "main"
+path = "examples/main.rs"

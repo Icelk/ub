@@ -5,8 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-mod lib;
-use lib::*;
+use ub::*;
 
 fn main() {
     let mut args = env::args().into_iter().skip(1);
